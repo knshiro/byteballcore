@@ -204,3 +204,69 @@ function deleteCatchupChainBalls(balls, callback) {
 	db.query("DELETE FROM catchup_chain_balls WHERE ball IN (?)", [balls], callback)
 }
 
+
+// ################
+// witness_proof.js
+// ################
+
+function unstableMCUnitsFromIndex(mci, callback) {
+	db.query(
+		"SELECT unit FROM units WHERE +is_on_main_chain=1 AND main_chain_index>? ORDER BY main_chain_index DESC",
+		[mci],
+		callback)
+}
+
+// select the newest last ball unit
+function getNewestUnitAmongst(units, callback) {
+	db.query(
+		"SELECT unit, main_chain_index FROM units WHERE unit IN(?) ORDER BY main_chain_index DESC LIMIT 1",
+		units,
+		callback
+	)
+}
+
+
+// add definition changes and new definitions of witnesses
+function witnessChangeAndDefinitionUnits(witnessAddresses, last_stable_mci, callback) {
+	var after_last_stable_mci_cond = (last_stable_mci > 0) ? "latest_included_mc_index>="+last_stable_mci : "1";
+	db.query(
+		/*"SELECT DISTINCT units.unit \n\
+		FROM unit_authors \n\
+		JOIN units USING(unit) \n\
+		LEFT JOIN address_definition_changes \n\
+			ON units.unit=address_definition_changes.unit AND unit_authors.address=address_definition_changes.address \n\
+		WHERE unit_authors.address IN(?) AND "+after_last_stable_mci_cond+" AND is_stable=1 AND sequence='good' \n\
+			AND (unit_authors.definition_chash IS NOT NULL OR address_definition_changes.unit IS NOT NULL) \n\
+		ORDER BY `level`",
+		[arrWitnesses],*/
+		// 1. initial definitions
+		// 2. address_definition_changes
+		// 3. revealing changed definitions
+		"SELECT unit, `level` \n\
+		FROM unit_authors "+db.forceIndex('unitAuthorsIndexByAddressDefinitionChash')+" \n\
+		CROSS JOIN units USING(unit) \n\
+		WHERE address IN(?) AND definition_chash=address AND "+after_last_stable_mci_cond+" AND is_stable=1 AND sequence='good' \n\
+		UNION \n\
+		SELECT unit, `level` \n\
+		FROM address_definition_changes \n\
+		CROSS JOIN units USING(unit) \n\
+		WHERE address_definition_changes.address IN(?) AND "+after_last_stable_mci_cond+" AND is_stable=1 AND sequence='good' \n\
+		UNION \n\
+		SELECT units.unit, `level` \n\
+		FROM address_definition_changes \n\
+		CROSS JOIN unit_authors USING(address, definition_chash) \n\
+		CROSS JOIN units ON unit_authors.unit=units.unit \n\
+		WHERE address_definition_changes.address IN(?) AND "+after_last_stable_mci_cond+" AND is_stable=1 AND sequence='good' \n\
+		ORDER BY `level`",
+		[witnessAddresses, witnessAddresses, witnessAddresses],
+		callback
+	)
+}
+
+function isUnitStable(unit, callback) {
+	db.query("SELECT 1 FROM units WHERE unit=? AND is_stable=1",
+	[unit],
+	function(rows){
+		callback(rows.length > 0);
+	})
+}

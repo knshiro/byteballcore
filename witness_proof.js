@@ -13,11 +13,11 @@ var validation = require('./validation.js');
 function prepareWitnessProof(arrWitnesses, last_stable_mci, handleResult){
 	var arrWitnessChangeAndDefinitionJoints = [];
 	var arrUnstableMcJoints = [];
-	
+
 	var arrLastBallUnits = []; // last ball units referenced from MC-majority-witnessed unstable MC units
 	var last_ball_unit = null;
 	var last_ball_mci = null;
-	
+
 	async.series([
 		function(cb){
 			storage.determineIfWitnessAddressDefinitionsHaveReferences(db, arrWitnesses, function(bWithReferences){
@@ -26,9 +26,8 @@ function prepareWitnessProof(arrWitnesses, last_stable_mci, handleResult){
 		},
 		function(cb){ // collect all unstable MC units
 			var arrFoundWitnesses = [];
-			db.query(
-				"SELECT unit FROM units WHERE +is_on_main_chain=1 AND main_chain_index>? ORDER BY main_chain_index DESC",
-				[storage.getMinRetrievableMci()],
+			dao.unstableMCUnitsFromIndex(
+				storage.getMinRetrievableMci(),
 				function(rows){
 					async.eachSeries(rows, function(row, cb2){
 						storage.readJointWithBall(db, row.unit, function(objJoint){
@@ -52,44 +51,18 @@ function prepareWitnessProof(arrWitnesses, last_stable_mci, handleResult){
 		function(cb){ // select the newest last ball unit
 			if (arrLastBallUnits.length === 0)
 				return cb("your witness list might be too much off, too few witness authored units");
-			db.query("SELECT unit, main_chain_index FROM units WHERE unit IN(?) ORDER BY main_chain_index DESC LIMIT 1", [arrLastBallUnits], function(rows){
-				last_ball_unit = rows[0].unit;
-				last_ball_mci = rows[0].main_chain_index;
-				(last_stable_mci >= last_ball_mci) ? cb("already_current") : cb();
-			});
+			dao.getNewestUnitAmongst(
+				arrLastBallUnits,
+				function(rows){
+					last_ball_unit = rows[0].unit;
+					last_ball_mci = rows[0].main_chain_index;
+					(last_stable_mci >= last_ball_mci) ? cb("already_current") : cb();
+				}
+			);
 		},
 		function(cb){ // add definition changes and new definitions of witnesses
-			var after_last_stable_mci_cond = (last_stable_mci > 0) ? "latest_included_mc_index>="+last_stable_mci : "1";
-			db.query(
-				/*"SELECT DISTINCT units.unit \n\
-				FROM unit_authors \n\
-				JOIN units USING(unit) \n\
-				LEFT JOIN address_definition_changes \n\
-					ON units.unit=address_definition_changes.unit AND unit_authors.address=address_definition_changes.address \n\
-				WHERE unit_authors.address IN(?) AND "+after_last_stable_mci_cond+" AND is_stable=1 AND sequence='good' \n\
-					AND (unit_authors.definition_chash IS NOT NULL OR address_definition_changes.unit IS NOT NULL) \n\
-				ORDER BY `level`", 
-				[arrWitnesses],*/
-				// 1. initial definitions
-				// 2. address_definition_changes
-				// 3. revealing changed definitions
-				"SELECT unit, `level` \n\
-				FROM unit_authors "+db.forceIndex('unitAuthorsIndexByAddressDefinitionChash')+" \n\
-				CROSS JOIN units USING(unit) \n\
-				WHERE address IN(?) AND definition_chash=address AND "+after_last_stable_mci_cond+" AND is_stable=1 AND sequence='good' \n\
-				UNION \n\
-				SELECT unit, `level` \n\
-				FROM address_definition_changes \n\
-				CROSS JOIN units USING(unit) \n\
-				WHERE address_definition_changes.address IN(?) AND "+after_last_stable_mci_cond+" AND is_stable=1 AND sequence='good' \n\
-				UNION \n\
-				SELECT units.unit, `level` \n\
-				FROM address_definition_changes \n\
-				CROSS JOIN unit_authors USING(address, definition_chash) \n\
-				CROSS JOIN units ON unit_authors.unit=units.unit \n\
-				WHERE address_definition_changes.address IN(?) AND "+after_last_stable_mci_cond+" AND is_stable=1 AND sequence='good' \n\
-				ORDER BY `level`", 
-				[arrWitnesses, arrWitnesses, arrWitnesses],
+			dao.witnessChangeAndDefinitionUnits(
+				arrWitnesses,
 				function(rows){
 					async.eachSeries(rows, function(row, cb2){
 						storage.readJoint(db, row.unit, {
@@ -116,7 +89,7 @@ function prepareWitnessProof(arrWitnesses, last_stable_mci, handleResult){
 function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJoints, bFromCurrent, handleResult){
 
 	myWitnesses.readMyWitnesses(function(arrWitnesses){
-		
+
 		// unstable MC joints
 		var arrParentUnits = null;
 		var arrFoundWitnesses = [];
@@ -152,11 +125,11 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 		if (arrFoundWitnesses.length < constants.MAJORITY_OF_WITNESSES)
 			return handleResult("not enough witnesses");
 
-		
+
 		if (arrLastBallUnits.length === 0)
 			throw Error("processWitnessProof: no last ball units");
 
-		
+
 		// changes and definitions of witnesses
 		for (var i=0; i<arrWitnessChangeAndDefinitionJoints.length; i++){
 			var objJoint = arrWitnessChangeAndDefinitionJoints[i];
@@ -174,10 +147,10 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 			if (!bAuthoredByWitness)
 				return handleResult("not authored by my witness");
 		}
-		
+
 		var assocDefinitions = {}; // keyed by definition chash
 		var assocDefinitionChashes = {}; // keyed by address
-		
+
 		// checks signatures and updates definitions
 		function validateUnit(objUnit, bRequireDefinitionOrChange, cb2){
 			var bFound = false;
@@ -204,7 +177,7 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 								return cb3(err);
 							for (var i=0; i<objUnit.messages.length; i++){
 								var message = objUnit.messages[i];
-								if (message.app === 'address_definition_change' 
+								if (message.app === 'address_definition_change'
 										&& (message.payload.address === address || objUnit.authors.length === 1 && objUnit.authors[0].address === address)){
 									assocDefinitionChashes[address] = message.payload.definition_chash;
 									bFound = true;
@@ -235,7 +208,7 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 				}
 			); // each authors
 		}
-		
+
 		var unlock = null;
 		async.series([
 			function(cb){ // read latest known definitions of witness addresses
@@ -246,7 +219,7 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 					return cb();
 				}
 				async.eachSeries(
-					arrWitnesses, 
+					arrWitnesses,
 					function(address, cb2){
 						storage.readDefinitionByAddress(db, address, null, {
 							ifFound: function(arrDefinition){
@@ -271,11 +244,13 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 						var objUnit = objJoint.unit;
 						if (!bFromCurrent)
 							return validateUnit(objUnit, true, cb2);
-						db.query("SELECT 1 FROM units WHERE unit=? AND is_stable=1", [objUnit.unit], function(rows){
-							if (rows.length > 0) // already known and stable - skip it
-								return cb2();
-							validateUnit(objUnit, true, cb2);
-						});
+						dao.isUnitStable(
+							objUnit.unit,
+							function(isStable){
+								if (isStable) // already known and stable - skip it
+									return cb2();
+								validateUnit(objUnit, true, cb2);
+							});
 					},
 					cb
 				); // each change or definition
@@ -292,7 +267,7 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 		], function(err){
 			err ? handleResult(err) : handleResult(null, arrLastBallUnits, assocLastBallByLastBallUnit);
 		});
-		
+
 	});
 
 }
