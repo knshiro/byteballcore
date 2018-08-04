@@ -5,6 +5,7 @@ var _ = require('lodash');
 var storage = require('./storage.js');
 var objectHash = require("./object_hash.js");
 var db = require('./db.js');
+var dao = require('./dao.js');
 var mutex = require('./mutex.js');
 var validation = require('./validation.js');
 var witnessProof = require('./witness_proof.js');
@@ -17,7 +18,7 @@ function prepareCatchupChain(catchupRequest, callbacks){
 	var last_stable_mci = catchupRequest.last_stable_mci;
 	var last_known_mci = catchupRequest.last_known_mci;
 	var arrWitnesses = catchupRequest.witnesses;
-	
+
 	if (typeof last_stable_mci !== "number")
 		return callbacks.ifError("no last_stable_mci");
 	if (typeof last_known_mci !== "number")
@@ -30,14 +31,14 @@ function prepareCatchupChain(catchupRequest, callbacks){
 	mutex.lock(['prepareCatchupChain'], function(unlock){
 		var start_ts = Date.now();
 		var objCatchupChain = {
-			unstable_mc_joints: [], 
+			unstable_mc_joints: [],
 			stable_last_ball_joints: [],
 			witness_change_and_definition_joints: []
 		};
 		var last_ball_unit = null;
 		async.series([
 			function(cb){ // check if the peer really needs hash trees
-				db.query("SELECT is_stable FROM units WHERE is_on_main_chain=1 AND main_chain_index=?", [last_known_mci], function(rows){
+				dao.unitsFromMainChainAtIndex(last_known_mci, function(rows){
 					if (rows.length === 0)
 						return cb("already_current");
 					if (rows[0].is_stable === 0)
@@ -47,7 +48,7 @@ function prepareCatchupChain(catchupRequest, callbacks){
 			},
 			function(cb){
 				witnessProof.prepareWitnessProof(
-					arrWitnesses, last_stable_mci, 
+					arrWitnesses, last_stable_mci,
 					function(err, arrUnstableMcJoints, arrWitnessChangeAndDefinitionJoints, _last_ball_unit, _last_ball_mci){
 						if (err)
 							return cb(err);
@@ -101,14 +102,14 @@ function processCatchupChain(catchupChain, peer, callbacks){
 		catchupChain.witness_change_and_definition_joints = [];
 	if (!Array.isArray(catchupChain.witness_change_and_definition_joints))
 		return callbacks.ifError("witness_change_and_definition_joints must be array");
-	
+
 	witnessProof.processWitnessProof(
-		catchupChain.unstable_mc_joints, catchupChain.witness_change_and_definition_joints, true, 
+		catchupChain.unstable_mc_joints, catchupChain.witness_change_and_definition_joints, true,
 		function(err, arrLastBallUnits, assocLastBallByLastBallUnit){
-			
+
 			if (err)
 				return callbacks.ifError(err);
-		
+
 			var objFirstStableJoint = catchupChain.stable_last_ball_joints[0];
 			var objFirstStableUnit = objFirstStableJoint.unit;
 			if (arrLastBallUnits.indexOf(objFirstStableUnit.unit) === -1)
@@ -145,15 +146,14 @@ function processCatchupChain(catchupChain, peer, callbacks){
 				function(cb){
 					mutex.lock(["catchup_chain"], function(_unlock){
 						unlock = _unlock;
-						db.query("SELECT 1 FROM catchup_chain_balls LIMIT 1", function(rows){
-							(rows.length > 0) ? cb("duplicate") : cb();
+						dao.anyCatchupChainBalls(function(anyBalls){
+							(anyBalls) ? cb("duplicate") : cb();
 						});
 					});
 				},
 				function(cb){ // adjust first chain ball if necessary and make sure it is the only stable unit in the entire chain
-					db.query(
-						"SELECT is_stable, is_on_main_chain, main_chain_index FROM balls JOIN units USING(unit) WHERE ball=?", 
-						[arrChainBalls[0]], 
+					dao.getUnitsForBall(
+						arrChainBalls[0],
 						function(rows){
 							if (rows.length === 0){
 								if (storage.isGenesisBall(arrChainBalls[0]))
@@ -174,21 +174,22 @@ function processCatchupChain(catchupChain, peer, callbacks){
 								arrChainBalls[0] = objLastStableMcUnitProps.ball; // replace to avoid receiving duplicates
 								if (!arrChainBalls[1])
 									return cb();
-								db.query("SELECT is_stable FROM balls JOIN units USING(unit) WHERE ball=?", [arrChainBalls[1]], function(rows2){
-									if (rows2.length === 0)
-										return cb();
-									var objSecondChainBallProps = rows2[0];
-									if (objSecondChainBallProps.is_stable === 1)
-										return cb("second chain ball "+arrChainBalls[1]+" must not be stable");
-									cb();
+								dao.getUnitsForBall(
+									arrChainBalls[1],
+									function(rows2){
+										if (rows2.length === 0)
+											return cb();
+										var objSecondChainBallProps = rows2[0];
+										if (objSecondChainBallProps.is_stable === 1)
+											return cb("second chain ball "+arrChainBalls[1]+" must not be stable");
+										cb();
 								});
 							});
 						}
 					);
 				},
 				function(cb){ // validation complete, now write the chain for future downloading of hash trees
-					var arrValues = arrChainBalls.map(function(ball){ return "("+db.escape(ball)+")"; });
-					db.query("INSERT INTO catchup_chain_balls (ball) VALUES "+arrValues.join(', '), function(){
+					dao.createCatchupChainBalls(arrChainBalls, function(){
 						cb();
 					});
 				}
@@ -212,9 +213,8 @@ function readHashTree(hashTreeRequest, callbacks){
 		return callbacks.ifError("no to_ball");
 	var from_mci;
 	var to_mci;
-	db.query(
-		"SELECT is_stable, is_on_main_chain, main_chain_index, ball FROM balls JOIN units USING(unit) WHERE ball IN(?,?)", 
-		[from_ball, to_ball], 
+	dao.getUnitsForBalls(
+		[from_ball, to_ball],
 		function(rows){
 			if (rows.length !== 2)
 				return callbacks.ifError("some balls not found");
@@ -233,10 +233,9 @@ function readHashTree(hashTreeRequest, callbacks){
 				return callbacks.ifError("from is after to");
 			var arrBalls = [];
 			var op = (from_mci === 0) ? ">=" : ">"; // if starting from 0, add genesis itself
-			db.query(
-				"SELECT unit, ball, content_hash FROM units LEFT JOIN balls USING(unit) \n\
-				WHERE main_chain_index "+op+" ? AND main_chain_index<=? ORDER BY main_chain_index, `level`", 
-				[from_mci, to_mci], 
+			dao.findUnitsBetweenMcis(
+				from_mci,
+				to_mci,
 				function(ball_rows){
 					async.eachSeries(
 						ball_rows,
@@ -246,16 +245,14 @@ function readHashTree(hashTreeRequest, callbacks){
 							if (objBall.content_hash)
 								objBall.is_nonserial = true;
 							delete objBall.content_hash;
-							db.query(
-								"SELECT ball FROM parenthoods LEFT JOIN balls ON parent_unit=balls.unit WHERE child_unit=? ORDER BY ball", 
-								[objBall.unit],
+							dao.findUnitBallParents(
+								objBall.unit,
 								function(parent_rows){
 									if (parent_rows.some(function(parent_row){ return !parent_row.ball; }))
 										throw Error("some parents have no balls");
 									if (parent_rows.length > 0)
 										objBall.parent_balls = parent_rows.map(function(parent_row){ return parent_row.ball; });
-									db.query(
-										"SELECT ball FROM skiplist_units LEFT JOIN balls ON skiplist_unit=balls.unit WHERE skiplist_units.unit=? ORDER BY ball", 
+									dao.findSkipListUnits(
 										[objBall.unit],
 										function(srows){
 											if (srows.some(function(srow){ return !srow.ball; }))
@@ -283,17 +280,17 @@ function processHashTree(arrBalls, callbacks){
 	if (!Array.isArray(arrBalls))
 		return callbacks.ifError("no balls array");
 	mutex.lock(["hash_tree"], function(unlock){
-		
-		db.query("SELECT 1 FROM hash_tree_balls LIMIT 1", function(ht_rows){
-			//if (ht_rows.length > 0) // duplicate
+
+		dao.anyHashTreeBalls( function(anyBalls){
+			//if (anyBalls) // duplicate
 			//    return unlock();
-			
-			db.takeConnectionFromPool(function(conn){
-				
-				conn.query("BEGIN", function(){
-					
+
+//			db.takeConnectionFromPool(function(conn){
+
+//				conn.query("BEGIN", function(){
+
 					var max_mci = null;
-					async.eachSeries(
+					async.mapSeries(
 						arrBalls,
 						function(objBall, cb){
 							if (typeof objBall.ball !== "string")
@@ -311,18 +308,17 @@ function processHashTree(arrBalls, callbacks){
 
 							function addBall(){
 								// insert even if it already exists in balls, because we need to define max_mci by looking outside this hash tree
-								conn.query("INSERT "+conn.getIgnore()+" INTO hash_tree_balls (ball, unit) VALUES(?,?)", [objBall.ball, objBall.unit], function(){
-									cb();
+								dao.addHashTreeBall(objBall, function(){
+									cb(null, objBall);
 									//console.log("inserted unit "+objBall.unit, objBall.ball);
 								});
 							}
-							
+
 							function checkSkiplistBallsExist(){
 								if (!objBall.skiplist_balls)
 									return addBall();
-								conn.query(
-									"SELECT ball FROM hash_tree_balls WHERE ball IN(?) UNION SELECT ball FROM balls WHERE ball IN(?)",
-									[objBall.skiplist_balls, objBall.skiplist_balls],
+								dao.findBallsInHashTreeAndInBalls(
+									objBall.skiplist_balls,
 									function(rows){
 										if (rows.length !== objBall.skiplist_balls.length)
 											return cb("some skiplist balls not found");
@@ -333,15 +329,14 @@ function processHashTree(arrBalls, callbacks){
 
 							if (!objBall.parent_balls)
 								return checkSkiplistBallsExist();
-							conn.query("SELECT ball FROM hash_tree_balls WHERE ball IN(?)", [objBall.parent_balls], function(rows){
+							dao.findBallsInHashTree([objBall.parent_balls], function(rows){
 								//console.log(rows.length+" rows", objBall.parent_balls);
 								if (rows.length === objBall.parent_balls.length)
 									return checkSkiplistBallsExist();
 								var arrFoundBalls = rows.map(function(row) { return row.ball; });
 								var arrMissingBalls = _.difference(objBall.parent_balls, arrFoundBalls);
-								conn.query(
-									"SELECT ball, main_chain_index, is_on_main_chain FROM balls JOIN units USING(unit) WHERE ball IN(?)", 
-									[arrMissingBalls], 
+								dao.getUnitsForBalls(
+									[arrMissingBalls],
 									function(rows2){
 										if (rows2.length !== arrMissingBalls.length)
 											return cb("some parents not found, unit "+objBall.unit);
@@ -355,30 +350,36 @@ function processHashTree(arrBalls, callbacks){
 								);
 							});
 						},
-						function(error){
-							
+						function(error, insertedObjBalls){
+
 							function finish(err){
-								conn.query(err ? "ROLLBACK" : "COMMIT", function(){
-									conn.release();
+								function doFinish(err) {
 									unlock();
 									err ? callbacks.ifError(err) : callbacks.ifOk();
-								});
+								}
+								if(err) {
+									var insertedBalls = insertedObjBalls.map(function(objBall) { return objBall.ball; })
+									dao.deleteHashTreeBalls(insertedBalls, function() {
+										doFinish(err)
+									})
+								}
+								else {
+									doFinish(err)
+								}
 							}
 
 							if (error)
 								return finish(error);
-							
+
 							// it is ok that max_mci === null as the 2nd tree does not touch finished balls
 							//if (max_mci === null && !storage.isGenesisUnit(arrBalls[0].unit))
 							//    return finish("max_mci not defined");
-							
+
 							// check that the received tree matches the first pair of chain elements
-							conn.query(
-								"SELECT ball, main_chain_index \n\
-								FROM catchup_chain_balls LEFT JOIN balls USING(ball) LEFT JOIN units USING(unit) \n\
-								ORDER BY member_index LIMIT 2", 
-								function(rows){
-									
+							dao.getCatchupBalls(
+								2,
+								function (rows) {
+
 									if (rows.length !== 2)
 										return finish("expecting to have 2 elements in the chain");
 									// removed: the main chain might be rebuilt if we are sending new units while syncing
@@ -387,27 +388,15 @@ function processHashTree(arrBalls, callbacks){
 									if (rows[1].ball !== arrBalls[arrBalls.length-1].ball)
 										return finish("tree root doesn't match second chain element");
 									// remove the last chain element, we now have hash tree instead
-									conn.query("DELETE FROM catchup_chain_balls WHERE ball=?", [rows[0].ball], function(){
-										
-										purgeHandledBallsFromHashTree(conn, finish);
+									dao.deleteCatchupChainBall([rows[0].ball], function(){
+										dao.purgeHandledBallsFromHashTree(finish);
 									});
 								}
 							);
 						}
 					);
-				});
-			});
-		});
-	});
-}
-
-function purgeHandledBallsFromHashTree(conn, onDone){
-	conn.query("SELECT ball FROM hash_tree_balls CROSS JOIN balls USING(ball)", function(rows){
-		if (rows.length === 0)
-			return onDone();
-		var arrHandledBalls = rows.map(function(row){ return row.ball; });
-		conn.query("DELETE FROM hash_tree_balls WHERE ball IN(?)", [arrHandledBalls], function(){
-			onDone();
+				// });
+			// });
 		});
 	});
 }
