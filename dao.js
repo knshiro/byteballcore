@@ -270,3 +270,255 @@ function isUnitStable(unit, callback) {
 		callback(rows.length > 0);
 	})
 }
+
+// ################
+// validation.js
+// ################
+
+function isUnitStored(unit, callback) {
+	conn.query(
+		"SELECT 1 FROM units WHERE unit=?",
+		[unit],
+		function(rows){
+			callback(rows.length > 0);
+		}
+	)
+}
+
+function findUnitFromBallInHashTreeBalls(ball, callback) {
+	db.query(
+		"SELECT unit FROM hash_tree_balls WHERE ball=?",
+		[ball],
+		callback
+	)
+}
+
+function findBallsInHashTreeAndInBallsFromUnits(units, callback) {
+	db.query(
+		"SELECT ball FROM hash_tree_balls WHERE unit IN(?) \n\
+		UNION \n\
+		SELECT ball FROM balls WHERE unit IN(?) \n\
+		ORDER BY ball",
+		[units, units],
+		callback
+	)
+}
+
+function getUnit(unit, callback) {
+	db.query(
+		"SELECT unit, is_stable, is_on_main_chain, main_chain_index FROM units WHERE unit=?",
+		[unit],
+		callback
+	)
+}
+
+function getUnitFull(unit, includeBall, callback) {
+	var join = includeBall ? 'LEFT JOIN balls USING(unit) LEFT JOIN hash_tree_balls ON units.unit=hash_tree_balls.unit' : '';
+	var field = includeBall ? ', IFNULL(balls.ball, hash_tree_balls.ball) AS ball' : '';
+	db.query(
+		"SELECT units.*"+field+" FROM units "+join+" WHERE units.unit=?",
+		unit,
+		callback
+	)
+}
+
+function findDuplicateAddressesForUnits(units, callback) {
+	db.query(
+		"SELECT address, COUNT(*) AS c \n\
+		FROM unit_authors WHERE unit IN(?) \n\
+		GROUP BY address HAVING c>1",
+		[units],
+		callback)
+}
+
+function findMaxLastBallMciAmoungsUnits(units, callback) {
+	db.query(
+		"SELECT MAX(lb_units.main_chain_index) AS max_parent_last_ball_mci \n\
+		FROM units JOIN units AS lb_units ON units.last_ball_unit=lb_units.unit \n\
+		WHERE units.unit IN(?)",
+		[units],
+		callback
+	)
+}
+
+function findErrorFromUnits(units, callback) {
+	db.query(
+		"SELECT error FROM known_bad_joints WHERE unit IN(?)",
+		[units],
+		callback
+	)
+
+}
+
+function getUnitWithBallAndMaxMci(unit, callback) {
+	db.query(
+		"SELECT is_stable, is_on_main_chain, main_chain_index, ball, (SELECT MAX(main_chain_index) FROM units) AS max_known_mci \n\
+		FROM units LEFT JOIN balls USING(unit) WHERE unit=?",
+		[unit],
+		callback
+	)
+}
+
+function findBallFromUnit(unit, callback) {
+	db.query(
+		"SELECT ball FROM balls WHERE unit=?",
+		[unit],
+		callback
+	)
+
+}
+
+function isAnyReferenceInWitnessAddressDefinitions(witnesses, lastBallMci, callback) {
+
+	var cross = (conf.storage === 'sqlite') ? 'CROSS' : ''; // correct the query planner
+	conn.query(
+		"SELECT 1 \n\
+		FROM address_definition_changes \n\
+		JOIN definitions USING(definition_chash) \n\
+		JOIN units AS change_units USING(unit)   -- units where the change was declared \n\
+		JOIN unit_authors USING(definition_chash) \n\
+		JOIN units AS definition_units ON unit_authors.unit=definition_units.unit   -- units where the definition was disclosed \n\
+		WHERE address_definition_changes.address IN(?) AND has_references=1 \n\
+			AND change_units.is_stable=1 AND change_units.main_chain_index<=? AND +change_units.sequence='good' \n\
+			AND definition_units.is_stable=1 AND definition_units.main_chain_index<=? AND +definition_units.sequence='good' \n\
+		UNION \n\
+		SELECT 1 \n\
+		FROM definitions \n\
+		"+cross+" JOIN unit_authors USING(definition_chash) \n\
+		JOIN units AS definition_units ON unit_authors.unit=definition_units.unit   -- units where the definition was disclosed \n\
+		WHERE definition_chash IN(?) AND has_references=1 \n\
+			AND definition_units.is_stable=1 AND definition_units.main_chain_index<=? AND +definition_units.sequence='good' \n\
+		LIMIT 1",
+		[witnesses, lastBallMci, lastBallMci, witnesses, lastBallMci],
+		function(rows) {
+			callback(rows.length == 0)
+		}
+	)
+}
+
+function getUnitWithSequence(unit, callback) {
+	db.query(
+		"SELECT unit, sequence, is_stable, is_on_main_chain, main_chain_index FROM units WHERE unit=?",
+		[unit],
+		callback
+	)
+}
+
+function countStableGoodWitnesses(witnesses, lastBallMci, callback) {
+	// check that all witnesses are already known and their units are good and stable
+	db.query(
+		// address=definition_chash is true in the first appearence of the address
+		// (not just in first appearence: it can return to its initial definition_chash sometime later)
+		"SELECT COUNT(DISTINCT address) AS count_stable_good_witnesses FROM unit_authors JOIN units USING(unit) \n\
+		WHERE address=definition_chash AND +sequence='good' AND is_stable=1 AND main_chain_index<=? AND address IN(?)",
+		[lastBallMci, witnesses],
+		callback
+	)
+}
+
+
+function findOtherUnitsFromAddress(address, unit, minMci) {
+	conn.query( // _left_ join forces use of indexes in units
+		/*	"SELECT unit, is_stable \n\
+			FROM units \n\
+			"+cross+" JOIN unit_authors USING(unit) \n\
+			WHERE address=? AND (main_chain_index>? OR main_chain_index IS NULL) AND unit != ?",
+			[objAuthor.address, objValidationState.max_parent_limci, objUnit.unit],*/
+		"SELECT unit, is_stable \n\
+		FROM unit_authors \n\
+		CROSS JOIN units USING(unit) \n\
+		WHERE address=? AND _mci>? AND unit != ? \n\
+		UNION \n\
+		SELECT unit, is_stable \n\
+		FROM unit_authors \n\
+		CROSS JOIN units USING(unit) \n\
+		WHERE address=? AND _mci IS NULL AND unit != ?",
+		[objAuthor.address, objValidationState.max_parent_limci, objUnit.unit, objAuthor.address, objUnit.unit],
+		callback
+	)
+}
+
+
+function findUnitsWithAddressDefinitionChanges(address, minMci, callback) {
+	db.query(
+		"SELECT unit FROM address_definition_changes JOIN units USING(unit) \n\
+		WHERE address=? AND (is_stable=0 OR main_chain_index>? OR main_chain_index IS NULL)",
+		[address, minMci],
+		callback
+	)
+}
+
+function findUnitsWithPendinginDefinitions(address, minMci) {
+	//var filter = bNonserial ? "AND sequence='good'" : "";
+	//	var cross = (objValidationState.max_known_mci - objValidationState.last_ball_mci < 1000) ? 'CROSS' : '';
+	db.query( // _left_ join forces use of indexes in units
+		//	"SELECT unit FROM units "+cross+" JOIN unit_authors USING(unit) \n\
+		//	WHERE address=? AND definition_chash IS NOT NULL AND ( /* is_stable=0 OR */ main_chain_index>? OR main_chain_index IS NULL)",
+		//	[objAuthor.address, objValidationState.last_ball_mci],
+			"SELECT unit FROM unit_authors WHERE address=? AND definition_chash IS NOT NULL AND _mci>?  \n\
+			UNION \n\
+			SELECT unit FROM unit_authors WHERE address=? AND definition_chash IS NOT NULL AND _mci IS NULL",
+			[address, minMci, address],
+			callback
+	)
+}
+
+function findSpendProofsForUnit(unit, spendProofs, callback) {
+	var arrEqs = spendProofs.map(function(objSpendProof){
+		return "spend_proof="+conn.escape(objSpendProof.spend_proof)+
+			" AND address="+conn.escape(objSpendProof.address ? objSpendProof.address : objUnit.authors[0].address);
+	});
+	db.query(
+		"SELECT address, unit, main_chain_index, sequence \n\
+		FROM spend_proofs JOIN units USING(unit) \n\
+		WHERE unit != ? AND ("+arrEqs.join(" OR ")+")",
+		[unit],
+		callback
+	)
+}
+
+function findPollFromUnitAndChoice(unit, choice, callback) {
+	db.query(
+		"SELECT main_chain_index, sequence FROM polls JOIN poll_choices USING(unit) JOIN units USING(unit) WHERE unit=? AND choice=?",
+		[unit, choice],
+		callback
+	)
+}
+
+function getAsset(asset, denomination, callback){
+	db.query(
+		"SELECT count_coins FROM asset_denominations WHERE asset=? AND denomination=?",
+		[asset, denomination],
+		callback
+	)
+}
+
+function findOutput(unit, messageIndex, outputIndex, callback) {
+	db.query(
+		"SELECT amount, is_stable, sequence, address, main_chain_index, denomination, asset \n\
+		FROM outputs \n\
+		JOIN units USING(unit) \n\
+		WHERE outputs.unit=? AND message_index=? AND output_index=?",
+		[unit, messageIndex, outputIndex],
+		callback
+	)
+}
+
+function findPrivatePayment(unit, messageIndex, callback) {
+	db.query(
+		"SELECT payload_hash, app, units.sequence, units.is_stable, lb_units.main_chain_index AS last_ball_mci \n\
+		FROM messages JOIN units USING(unit) \n\
+		LEFT JOIN units AS lb_units ON units.last_ball_unit=lb_units.unit \n\
+		WHERE messages.unit=? AND message_index=?",
+		[unit, messageIndex],
+		callback
+	)
+}
+
+function findUnitParents(unit, callback) {
+	db.query(
+		"SELECT parent_unit FROM parenthoods WHERE child_unit=? ORDER BY parent_unit",
+		[unit],
+		callback
+	)
+}
