@@ -522,3 +522,78 @@ function findUnitParents(unit, callback) {
 		callback
 	)
 }
+
+// ################
+// graph.js
+// ################
+
+function getUnitsToCompare(units, callback) {
+	db.query(
+		"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain, is_free FROM units WHERE unit IN(?)",
+		[units],
+		callback
+	)
+}
+
+function findUnitParentsFull(units, callback) {
+	db.query(
+		"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain \n\
+		FROM parenthoods JOIN units ON parent_unit=unit \n\
+		WHERE child_unit IN(?)",
+		[units],
+		callback
+	);
+}
+
+function findUnitChildrenFull(units, callback) {
+	db.query(
+		"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain \n\
+		FROM parenthoods JOIN units ON child_unit=unit \n\
+		WHERE parent_unit IN(?)",
+		[units],
+		callback
+	)
+}
+
+function findUnitChildrenByAuthorsBeforeMci(units, addresses, mci, lastestIncludedMci, callback) {
+	db.query(
+		"SELECT units.unit, unit_authors.address AS author_in_list \n\
+		FROM parenthoods \n\
+		JOIN units ON child_unit=units.unit \n\
+		LEFT JOIN unit_authors ON unit_authors.unit=units.unit AND address IN(?) \n\
+		WHERE parent_unit IN(?) AND latest_included_mc_index<? AND main_chain_index<=?",
+		[addresses, units, lastestIncludedMci, mci],
+		callback
+	)
+}
+
+function findUnitsForAddresses(addresses, minMci, maxMci) {
+	db.query( // _left_ join forces use of indexes in units
+		"SELECT unit FROM units "+db.forceIndex("byMcIndex")+" LEFT JOIN unit_authors USING(unit) \n\
+		WHERE latest_included_mc_index>=? AND main_chain_index>? AND main_chain_index<=? AND latest_included_mc_index<? AND address IN(?)",
+		[minMci, minMci, maxMci, maxMci, addresses],
+//        "SELECT unit FROM units WHERE latest_included_mc_index>=? AND main_chain_index<=?",
+//        [objEarlierUnitProps.main_chain_index, to_main_chain_index],
+		callback
+	)
+}
+
+function findUnitChildrenBeforeMciAndLevel(units, mci, level){
+	db.query(
+		"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain \n\
+		FROM parenthoods JOIN units ON child_unit=unit \n\
+		WHERE parent_unit IN(?) AND latest_included_mc_index<? AND level<=?",
+		[units, mci, level],
+		callback
+	)
+}
+
+function findUnitParentsAfterMciWithLevel(units, mci, level, callback){
+	db.query(
+		"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain \n\
+		FROM parenthoods JOIN units ON parent_unit=unit \n\
+		WHERE child_unit IN(?) AND (main_chain_index>? OR main_chain_index IS NULL) AND level>=?",
+		[units, mci, level],
+		callback
+	)
+}

@@ -3,7 +3,7 @@
 var _ = require('lodash');
 var async = require('async');
 var storage = require('./storage.js');
-var db = require('./db.js');
+var dao = require('./dao.js');
 var profiler = require('./profiler.js');
 
 
@@ -11,9 +11,8 @@ var profiler = require('./profiler.js');
 function compareUnits(conn, unit1, unit2, handleResult){
 	if (unit1 === unit2)
 		return handleResult(0);
-	conn.query(
-		"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain, is_free FROM units WHERE unit IN(?)", 
-		[[unit1, unit2]], 
+	dao.getUnitsToCompare(
+		[unit1, unit2],
 		function(rows){
 			if (rows.length !== 2)
 				throw Error("not 2 rows");
@@ -74,11 +73,8 @@ function compareUnitsByProps(conn, objUnitProps1, objUnitProps2, handleResult){
 		//console.log('compare', arrStartUnits);
 		//console.log('compare goUp', objUnitProps1.unit, objUnitProps2.unit);
 		arrKnownUnits = arrKnownUnits.concat(arrStartUnits);
-		conn.query(
-			"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain \n\
-			FROM parenthoods JOIN units ON parent_unit=unit \n\
-			WHERE child_unit IN(?)",
-			[arrStartUnits],
+		dao.findUnitParentsFull(
+			arrStartUnits,
 			function(rows){
 				var arrNewStartUnits = [];
 				for (var i=0; i<rows.length; i++){
@@ -99,11 +95,8 @@ function compareUnitsByProps(conn, objUnitProps1, objUnitProps2, handleResult){
 	
 	function goDown(arrStartUnits){
 		arrKnownUnits = arrKnownUnits.concat(arrStartUnits);
-		conn.query(
-			"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain \n\
-			FROM parenthoods JOIN units ON child_unit=unit \n\
-			WHERE parent_unit IN(?)",
-			[arrStartUnits],
+		dao.findUnitChildrenFull(
+			arrStartUnits,
 			function(rows){
 				var arrNewStartUnits = [];
 				for (var i=0; i<rows.length; i++){
@@ -208,13 +201,7 @@ function determineIfIncluded(conn, earlier_unit, arrLaterUnits, handleResult){
 			if (arrParents.length)
 				return setImmediate(handleParents, arrParents);
 			
-			conn.query(
-				"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain \n\
-				FROM parenthoods JOIN units ON parent_unit=unit \n\
-				WHERE child_unit IN(?)",
-				[arrStartUnits],
-				handleParents
-			);
+			dao.findUnitParentsFull(arrStartUnits, handleParents);
 		}
 		
 		goUp(arrLaterUnits);
@@ -238,13 +225,11 @@ function readDescendantUnitsByAuthorsBeforeMcIndex(conn, objEarlierUnitProps, ar
 	function goDown(arrStartUnits){
 		profiler.start();
 		arrKnownUnits = arrKnownUnits.concat(arrStartUnits);
-		conn.query(
-			"SELECT units.unit, unit_authors.address AS author_in_list \n\
-			FROM parenthoods \n\
-			JOIN units ON child_unit=units.unit \n\
-			LEFT JOIN unit_authors ON unit_authors.unit=units.unit AND address IN(?) \n\
-			WHERE parent_unit IN(?) AND latest_included_mc_index<? AND main_chain_index<=?",
-			[arrAuthorAddresses, arrStartUnits, objEarlierUnitProps.main_chain_index, to_main_chain_index],
+		dao.findUnitChildrenByAuthorsBeforeMci(
+			arrStartUnits,
+			arrAuthorAddresses,
+			to_main_chain_index,
+			objEarlierUnitProps.main_chain_index,
 			function(rows){
 				var arrNewStartUnits = [];
 				for (var i=0; i<rows.length; i++){
@@ -262,12 +247,11 @@ function readDescendantUnitsByAuthorsBeforeMcIndex(conn, objEarlierUnitProps, ar
 	
 	profiler.start();
 
-	conn.query( // _left_ join forces use of indexes in units
-		"SELECT unit FROM units "+db.forceIndex("byMcIndex")+" LEFT JOIN unit_authors USING(unit) \n\
-		WHERE latest_included_mc_index>=? AND main_chain_index>? AND main_chain_index<=? AND latest_included_mc_index<? AND address IN(?)", 
-		[objEarlierUnitProps.main_chain_index, objEarlierUnitProps.main_chain_index, to_main_chain_index, to_main_chain_index, arrAuthorAddresses],
-//        "SELECT unit FROM units WHERE latest_included_mc_index>=? AND main_chain_index<=?", 
-//        [objEarlierUnitProps.main_chain_index, to_main_chain_index],
+
+	dao.findUnitsForAddresses(
+		arrAuthorAddresses,
+		objEarlierUnitProps.main_chain_index,
+		to_main_chain_index,
 		function(rows){
 			arrUnits = rows.map(function(row) { return row.unit; });
 			profiler.stop('mc-wc-descendants-initial');
@@ -287,11 +271,10 @@ function readDescendantUnitsBeforeLandingOnMc(conn, objEarlierUnitProps, arrLate
 	var arrUnlandedUnits = []; // direct shoots to later units, without touching the MC
 	
 	function goDown(arrStartUnits){
-		conn.query(
-			"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain \n\
-			FROM parenthoods JOIN units ON child_unit=unit \n\
-			WHERE parent_unit IN(?) AND latest_included_mc_index<? AND level<=?",
-			[arrStartUnits, objEarlierUnitProps.main_chain_index, max_later_level],
+		dao.findUnitChildrenBeforeMciAndLevel(
+			arrStartUnits,
+			objEarlierUnitProps.main_chain_index,
+			max_later_level,
 			function(rows){
 				var arrNewStartUnits = [];
 				for (var i=0; i<rows.length; i++){
@@ -329,11 +312,10 @@ function readAscendantUnitsAfterTakingOffMc(conn, objEarlierUnitProps, arrLaterU
 	});
 	
 	function goUp(arrStartUnits){
-		conn.query(
-			"SELECT unit, level, latest_included_mc_index, main_chain_index, is_on_main_chain \n\
-			FROM parenthoods JOIN units ON parent_unit=unit \n\
-			WHERE child_unit IN(?) AND (main_chain_index>? OR main_chain_index IS NULL) AND level>=?",
-			[arrStartUnits, max_later_limci, objEarlierUnitProps.level],
+		dao.findUnitParentsAfterMciWithLevel(
+			arrStartUnits,
+			max_later_limci,
+			objEarlierUnitProps.level,
 			function(rows){
 				var arrNewStartUnits = [];
 				for (var i=0; i<rows.length; i++){
