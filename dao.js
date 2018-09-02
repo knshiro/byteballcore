@@ -804,3 +804,64 @@ function findMaxSpendableMciFromHeadersCommissionOutputs(cb){
 		cb
 	)
 }
+
+// ####################
+// indivisible_asset.js
+// ####################
+
+
+function createPrivateTransfer(objPrivateElement, input, payload, inputAddress, isUnique, cb) {
+	conn.query(
+		"INSERT "+db.getIgnore()+" INTO inputs \n\
+		(unit, message_index, input_index, src_unit, src_message_index, src_output_index, asset, denomination, address, type, is_unique) \n\
+		VALUES (?,?,?,?,?,?,?,?,?,'transfer',?)", 
+		[objPrivateElement.unit, objPrivateElement.message_index, 0, input.unit, input.message_index, input.output_index, 
+		payload.asset, payload.denomination, inputAddress, isUnique],
+		cb
+	);
+}
+
+function createPrivateIssue(objPrivateElement, input, payload, inputAddress, isUnique, cb) {
+	conn.query(
+		"INSERT "+db.getIgnore()+" INTO inputs \n\
+		(unit, message_index, input_index, serial_number, amount, asset, denomination, address, type, is_unique) \n\
+		VALUES (?,?,?,?,?,?,?,?,'issue',?)", 
+		[objPrivateElement.unit, objPrivateElement.message_index, 0, input.serial_number, input.amount, 
+		payload.asset, payload.denomination, inputAddress, isUnique],
+		cb
+	);
+}
+
+function createPrivateOutput(objPrivateElement, output, payload, outputIndex, isSerial, isSpent, cb) {
+	var params = [];
+	var fields = "";
+	var values = "";
+	if (outputIndex === objPrivateElement.output_index){
+		fields += ", is_spent, address, blinding";
+		values += "?,?,?"
+		params.push(isSpent, objPrivateElement.output.address, objPrivateElement.output.blinding);
+	}
+
+	conn.query(
+		"INSERT "+db.getIgnore()+" INTO outputs \n\
+		(unit, message_index, output_index, amount, output_hash, asset, denomination, is_serial" + fields + ") \n\
+		VALUES (?,?,?,?,?,?,?,?" + values + ")",
+		[objPrivateElement.unit, objPrivateElement.message_index, outputIndex, 
+		output.amount, output.output_hash, payload.asset, payload.denomination, isSerial] + params,
+		cb
+	);
+}
+
+function updateOutputProps(unit, isSerial, cb) {
+	// may update several outputs
+	conn.query(
+		"UPDATE outputs SET is_serial=? WHERE unit=?", 
+		[isSerial, unit],
+		cb
+	);
+}
+
+function updateInputUniqueness(unit, cb){
+	// may update several inputs
+	conn.query("UPDATE inputs SET is_unique=1 WHERE unit=?", [unit], cb);
+}

@@ -233,19 +233,9 @@ function validateAndSavePrivatePaymentChain(conn, arrPrivateElements, callbacks)
 				var input = payload.inputs[0];
 				var is_unique = objPrivateElement.bStable ? 1 : null; // unstable still have chances to become nonserial therefore nonunique
 				if (!input.type) // transfer
-					conn.addQuery(arrQueries, 
-						"INSERT "+db.getIgnore()+" INTO inputs \n\
-						(unit, message_index, input_index, src_unit, src_message_index, src_output_index, asset, denomination, address, type, is_unique) \n\
-						VALUES (?,?,?,?,?,?,?,?,?,'transfer',?)", 
-						[objPrivateElement.unit, objPrivateElement.message_index, 0, input.unit, input.message_index, input.output_index, 
-						payload.asset, payload.denomination, input_address, is_unique]);
+					arrQueries.push(function(cb) { dao.createPrivateTransfer(objPrivateElement, input, payload, input_address, is_unique, cb) })
 				else if (input.type === 'issue')
-					conn.addQuery(arrQueries, 
-						"INSERT "+db.getIgnore()+" INTO inputs \n\
-						(unit, message_index, input_index, serial_number, amount, asset, denomination, address, type, is_unique) \n\
-						VALUES (?,?,?,?,?,?,?,?,'issue',?)", 
-						[objPrivateElement.unit, objPrivateElement.message_index, 0, input.serial_number, input.amount, 
-						payload.asset, payload.denomination, input_address, is_unique]);
+					arrQueries.push(function(cb) { dao.createPrivateIssue(objPrivateElement, input, payload, input_address, is_unique, cb) })
 				else
 					throw Error("neither transfer nor issue after validation");
 				var is_serial = objPrivateElement.bStable ? 1 : null; // initPrivatePaymentValidationState already checks for non-serial
@@ -253,21 +243,9 @@ function validateAndSavePrivatePaymentChain(conn, arrPrivateElements, callbacks)
 				for (var output_index=0; output_index<outputs.length; output_index++){
 					var output = outputs[output_index];
 					console.log("inserting output "+JSON.stringify(output));
-					conn.addQuery(arrQueries, 
-						"INSERT "+db.getIgnore()+" INTO outputs \n\
-						(unit, message_index, output_index, amount, output_hash, asset, denomination) \n\
-						VALUES (?,?,?,?,?,?,?)",
-						[objPrivateElement.unit, objPrivateElement.message_index, output_index, 
-						output.amount, output.output_hash, payload.asset, payload.denomination]);
-					var fields = "is_serial=?";
-					var params = [is_serial];
-					if (output_index === objPrivateElement.output_index){
-						var is_spent = (i===0) ? 0 : 1;
-						fields += ", is_spent=?, address=?, blinding=?";
-						params.push(is_spent, objPrivateElement.output.address, objPrivateElement.output.blinding);
-					}
-					params.push(objPrivateElement.unit, objPrivateElement.message_index, output_index);
-					conn.addQuery(arrQueries, "UPDATE outputs SET "+fields+" WHERE unit=? AND message_index=? AND output_index=? AND is_spent=0", params);
+					var is_spent = (i===0) ? 0 : 1;
+					arrQueries.push(function(cb) { createPrivateOutput(objPrivateElement, output, payload, output_index, is_serial, is_spent, cb) })
+					
 				}
 			}
 		//	console.log("queries: "+JSON.stringify(arrQueries));
@@ -285,20 +263,13 @@ function updateIndivisibleOutputsThatWereReceivedUnstable(conn, onDone){
 	
 	function updateOutputProps(unit, is_serial, onUpdated){
 		// may update several outputs
-		conn.query(
-			"UPDATE outputs SET is_serial=? WHERE unit=?", 
-			[is_serial, unit],
+		dao.updateOutputProps(
+			unit,
+			is_serial,
 			function(){
-				is_serial ? updateInputUniqueness(unit, onUpdated) : onUpdated();
+				is_serial ? dao.updateInputUniqueness(unit, onUpdated) : onUpdated();
 			}
 		);
-	}
-	
-	function updateInputUniqueness(unit, onUpdated){
-		// may update several inputs
-		conn.query("UPDATE inputs SET is_unique=1 WHERE unit=?", [unit], function(){
-			onUpdated();
-		});
 	}
 	
 	console.log("updatePrivateIndivisibleOutputsThatWereReceivedUnstable starting");
